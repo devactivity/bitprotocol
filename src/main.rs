@@ -1,21 +1,44 @@
-use bitprotocol::{human_bytes, metainfo::MetaInfo};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use bitprotocol::{
+    human_bytes,
+    metainfo::MetaInfo,
+    tracker::{self, Announce},
+};
 
-fn main() -> Result<()> {
+use anyhow::{Context, Result, bail};
+
+const PEERS_TO_SHOW: usize = 12;
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let path = std::env::args()
         .nth(1)
         .context("usage: bitprotocol <file.torrent>")?;
 
     let torrent = MetaInfo::from_file(&path)?;
-
     print_value(&torrent);
 
-    println!(
-        "\n piece 0 hash {}",
-        bitprotocol::hex(&torrent.piece_hashes[0])
-    );
-    println!("  magnet    {}", torrent.magnet());
+    let peer_id = bitprotocol::generate_peer_id();
+    println!("\nmy peer id: {}", String::from_utf8_lossy(&peer_id));
+
+    let peers = find_peers(&torrent, &peer_id).await?;
+    if peers.is_empty() {
+        bail!(
+            "
+        no peers returned
+            "
+        );
+    }
+
+    println!("\n peers ");
+    for addr in peers.iter().take(PEERS_TO_SHOW) {
+        println!("  {addr}");
+    }
+
+    if peers.len() > PEERS_TO_SHOW {
+        println!("  ..... and {} more", peers.len() - PEERS_TO_SHOW);
+    }
 
     Ok(())
 }
@@ -57,4 +80,41 @@ fn print_value(m: &MetaInfo) {
             println!("    ... and {} more", m.files.len() - 10);
         }
     }
+}
+
+async fn find_peers(torrent: &MetaInfo, peer_id: &[u8; 20]) -> Result<Vec<std::net::SocketAddr>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("bitprotocol/0.1")
+        .build()?;
+
+    println!("\n announcing ");
+
+    for url in torrent.trackers() {
+        let request = Announce::started(url, &torrent.info_hash, peer_id, torrent.total_length);
+
+        match tracker::announce(&client, &request).await {
+            Ok(response) => {
+                println!(
+                    "{url}\n   {} peers, {} seeders, {} leechers, re-announce in {}s",
+                    response.peers.len(),
+                    response.complete.map_or("?".into(), |n| n.to_string()),
+                    response.incomplete.map_or("?".into(), |n| n.to_string()),
+                    response.interval.as_secs()
+                );
+
+                if let Some(warning) = &response.warning {
+                    println!("   warning: {warning}");
+                }
+
+                if !response.peers.is_empty() {
+                    return Ok(response.peers);
+                }
+            }
+
+            Err(e) => println!("  {url}\n {e}"),
+        }
+    }
+
+    Ok(Vec::new())
 }

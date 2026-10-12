@@ -1,7 +1,22 @@
-use std::fmt::format;
-
 pub mod bencode;
 pub mod metainfo;
+pub mod tracker;
+
+pub const CLIENT_PREFIX: &[u8; 8] = b"-BP0001-";
+
+pub const DEFAULT_PORT: u16 = 6881;
+
+pub fn generate_peer_id() -> [u8; 20] {
+    let mut id = [0_u8; 20];
+
+    id[..8].copy_from_slice(CLIENT_PREFIX);
+
+    for byte in &mut id[8..] {
+        *byte = b'0' + rand::random::<u8>() % 10;
+    }
+
+    id
+}
 
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

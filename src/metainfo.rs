@@ -1,13 +1,7 @@
-use std::{
-    path::{Component, PathBuf},
-    usize,
-};
-
-use anyhow::{Context, Result, anyhow, bail};
-
-use sha1::{Digest, Sha1};
-
 use crate::bencode::{self, Value};
+use anyhow::{Context, Result, anyhow, bail};
+use sha1::{Digest, Sha1};
+use std::path::{Component, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -151,6 +145,10 @@ impl MetaInfo {
         let buf = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
 
         Self::from_bytes(&buf).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    pub fn piece_count(&self) -> usize {
+        self.piece_hashes.len()
     }
 
     pub fn piece_size(&self, index: usize) -> u64 {
