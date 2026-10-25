@@ -39,7 +39,7 @@ pub struct Announce<'a> {
 
     pub left: u64,
     pub event: Event,
-    pub num_peer: u32,
+    pub numwant: u32,
 }
 
 impl<'a> Announce<'a> {
@@ -58,7 +58,7 @@ impl<'a> Announce<'a> {
             downloaded: 0,
             left,
             event: Event::Started,
-            num_peer: 50,
+            numwant: 50,
         }
     }
 
@@ -70,7 +70,7 @@ impl<'a> Announce<'a> {
         };
 
         let mut url = format!(
-            "{}{separator}info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&num_peer={}&compact=1",
+            "{}{separator}info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}&numwant={}&compact=1",
             self.tracker_url,
             crate::urlencode(self.info_hash),
             crate::urlencode(self.peer_id),
@@ -78,7 +78,7 @@ impl<'a> Announce<'a> {
             self.uploaded,
             self.downloaded,
             self.left,
-            self.num_peer
+            self.numwant
         );
 
         if let Some(event) = self.event.as_param() {
