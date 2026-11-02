@@ -1,20 +1,24 @@
 use std::time::Duration;
 
 use bitprotocol::{
-    human_bytes,
+    hex, human_bytes,
     metainfo::MetaInfo,
+    peer::{Bitfield, Message, PeerConn},
     tracker::{self, Announce},
 };
 
 use anyhow::{Context, Result, bail};
 
-const PEERS_TO_SHOW: usize = 12;
+const PEERS_TO_SHOW: usize = 8;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LISTEN_WINDOW: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let path = std::env::args()
-        .nth(1)
-        .context("usage: bitprotocol <file.torrent>")?;
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: bitprotocol <file.torrent>");
+        std::process::exit(2);
+    };
 
     let torrent = MetaInfo::from_file(&path)?;
     print_value(&torrent);
@@ -40,6 +44,30 @@ async fn main() -> Result<()> {
         println!("  ..... and {} more", peers.len() - PEERS_TO_SHOW);
     }
 
+    println!("\n handshaking with up to {PEERS_TO_SHOW} peers ");
+    let mut tasks = tokio::task::JoinSet::new();
+    for addr in peers.into_iter().take(PEERS_TO_SHOW) {
+        let info_hash = torrent.info_hash;
+        let piece_count = torrent.piece_count();
+        tasks.spawn(async move {
+            let result = probe_peer(addr, info_hash, peer_id, piece_count).await;
+            (addr, result)
+        });
+    }
+
+    let mut reached = 0;
+    while let Some(joined) = tasks.join_next().await {
+        let (addr, result) = joined.context("peer task panicked")?;
+        match result {
+            Ok(report) => {
+                reached += 1;
+                println!("\n  {addr} - {report}");
+            }
+            Err(e) => println!("\n  {addr} - failed: {e}"),
+        }
+    }
+
+    println!("\nreached {reached} peer(s).");
     Ok(())
 }
 
@@ -117,4 +145,72 @@ async fn find_peers(torrent: &MetaInfo, peer_id: &[u8; 20]) -> Result<Vec<std::n
     }
 
     Ok(Vec::new())
+}
+
+async fn probe_peer(
+    addr: std::net::SocketAddr,
+    info_hash: [u8; 20],
+    peer_id: [u8; 20],
+    piece_count: usize,
+) -> Result<String> {
+    let mut conn = PeerConn::connect(addr, info_hash, peer_id, CONNECT_TIMEOUT).await?;
+
+    let mut report = format!(
+        "{} (id {})",
+        bitprotocol::peer::client_name(&conn.handshake.peer_id),
+        hex(&conn.handshake.peer_id[..6]),
+    );
+    if conn.handshake.extended() {
+        report.push_str(" [BEP10]");
+    }
+    if conn.handshake.dht() {
+        report.push_str(" [DHT]");
+    }
+
+    conn.write_message(&Message::Interested).await?;
+
+    let deadline = tokio::time::Instant::now() + LISTEN_WINDOW;
+    let mut have = Bitfield::empty(piece_count);
+    let mut saw_bitfield = false;
+    let mut lines = Vec::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match conn.read_message_timeout(remaining).await? {
+            Some(Message::Bitfield(bits)) => {
+                saw_bitfield = true;
+                match Bitfield::from_bytes(bits, piece_count) {
+                    Ok(bf) => have = bf,
+                    Err(e) => lines.push(format!("bad bitfield: {e}")),
+                }
+            }
+            Some(Message::Have(index)) => {
+                saw_bitfield = true;
+                have.set_data(index as usize);
+            }
+            Some(msg) => lines.push(msg.label()),
+            None => break,
+        }
+    }
+
+    if saw_bitfield {
+        let pct = 100.0 * have.count() as f64 / piece_count.max(1) as f64;
+        lines.insert(
+            0,
+            format!(
+                "has {}/{} pieces ({pct:.1}%){}",
+                have.count(),
+                piece_count,
+                if have.is_complete() { ", seeder" } else { "" }
+            ),
+        );
+    }
+    if !lines.is_empty() {
+        report.push_str("\n      ");
+        report.push_str(&lines.join("\n      "));
+    }
+    Ok(report)
 }

@@ -1,4 +1,4 @@
-use std::{fmt::format, net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use tokio::{
@@ -43,14 +43,14 @@ impl Handshake {
     }
 
     pub fn decode(buf: &[u8; 68]) -> Result<Self> {
-        if buf[0] as usize != PROTOCOL.len() || &buf[1..28] != PROTOCOL {
+        if buf[0] as usize != PROTOCOL.len() || &buf[1..20] != PROTOCOL {
             bail!("peer did not speak the BitTorrent handshake");
         }
 
         Ok(Self {
             reserved: buf[20..28].try_into().expect("8 bytes"),
             info_hash: buf[28..48].try_into().expect("20 bytes"),
-            peer_id: buf[40..68].try_into().expect("20 bytes"),
+            peer_id: buf[48..68].try_into().expect("20 bytes"),
         })
     }
 
@@ -199,7 +199,7 @@ impl Message {
             }
             4 => {
                 data(4)?;
-                Message::Have(fourth_slice(payload, 4))
+                Message::Have(fourth_slice(payload, 0))
             }
             5 => Message::Bitfield(payload.to_vec()),
             6 => {
@@ -326,5 +326,90 @@ impl Bitfield {
             self.bits[index / 8] // stays at bits[1]
             |= 0x80 >> (index % 8);
         }
+    }
+
+    pub fn count(&self) -> usize {
+        self.bits.iter().map(|b| b.count_ones() as usize).sum()
+    }
+
+    pub fn piece_count(&self) -> usize {
+        self.piece_count
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.count() == self.piece_count
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bits
+    }
+}
+
+pub struct PeerConn {
+    stream: TcpStream,
+    pub addr: SocketAddr,
+    pub handshake: Handshake,
+}
+
+impl PeerConn {
+    pub async fn connect(
+        addr: SocketAddr,
+        info_hash: [u8; 20],
+        peer_id: [u8; 20],
+        timeout: Duration,
+    ) -> Result<Self> {
+        let mut stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+            .await
+            .with_context(|| format!("connecting to {addr} timed out"))?
+            .with_context(|| format!("connecting to {addr}"))?;
+        stream.set_nodelay(true).ok();
+
+        let ours = Handshake::new(info_hash, peer_id);
+        let theirs = tokio::time::timeout(timeout, async {
+            stream.write_all(&ours.encode()).await?;
+            let mut buf = [0u8; 68];
+            stream.read_exact(&mut buf).await?;
+            Handshake::decode(&buf)
+        })
+        .await
+        .with_context(|| format!("handshake with {addr} timed out"))??;
+
+        if theirs.info_hash != info_hash {
+            bail!(
+                "{addr} answered for a different torrent ({})",
+                crate::hex(&theirs.info_hash)
+            );
+        }
+
+        Ok(Self {
+            stream,
+            addr,
+            handshake: theirs,
+        })
+    }
+
+    pub async fn read_message(&mut self) -> Result<Message> {
+        let mut len_buf = [0u8; 4];
+        self.stream.read_exact(&mut len_buf).await?;
+        let len = u32::from_be_bytes(len_buf);
+        if len > MAX_MESSAGE_LEN {
+            bail!("{} announced a {len} byte message", self.addr);
+        }
+
+        let mut body = vec![0u8; len as usize];
+        self.stream.read_exact(&mut body).await?;
+        Message::decode(&body)
+    }
+
+    pub async fn read_message_timeout(&mut self, timeout: Duration) -> Result<Option<Message>> {
+        match tokio::time::timeout(timeout, self.read_message()).await {
+            Ok(result) => result.map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub async fn write_message(&mut self, msg: &Message) -> Result<()> {
+        self.stream.write_all(&msg.encode()).await?;
+        Ok(())
     }
 }

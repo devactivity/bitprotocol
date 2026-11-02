@@ -1,6 +1,7 @@
 pub mod bencode;
 pub mod metainfo;
 pub mod peer;
+pub mod storage;
 pub mod tracker;
 
 pub const CLIENT_PREFIX: &[u8; 8] = b"-BP0001-";
