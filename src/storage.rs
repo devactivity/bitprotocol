@@ -46,7 +46,7 @@ impl Storage {
                 .read(true)
                 .write(true)
                 .create(true)
-                .truncate(true)
+                .truncate(false)
                 .open(&path)
                 .with_context(|| format!("opening {}", path.display()))?;
 
