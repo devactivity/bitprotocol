@@ -1,6 +1,7 @@
 pub mod bencode;
 pub mod metainfo;
 pub mod peer;
+pub mod picker;
 pub mod storage;
 pub mod tracker;
 
